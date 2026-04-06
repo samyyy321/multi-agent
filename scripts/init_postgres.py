@@ -2,7 +2,7 @@
 # PostgreSQL 数据导入脚本
 # 功能：从 medical.json 导入医学数据到已建好的表
 # 前置条件：已通过 Alembic 建表（alembic upgrade head）
-# 用法: cd tiangong-agent && python scripts/init_postgres.py
+# 用法: cd multi-agent && python scripts/init_postgres.py
 # ============================================================
 
 import json
