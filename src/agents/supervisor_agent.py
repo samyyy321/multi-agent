@@ -1,11 +1,42 @@
+from langchain.agents.middleware import SummarizationMiddleware
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langchain.agents import create_agent
 from langchain_deepseek.chat_models import ChatDeepSeek
-from src.infra.redis_cache import get_checkpointer_redis
-from langchain.agents.middleware import SummarizationMiddleware
 
+from src.agents.store_tools import save_memory, search_memory
+from src.core.config import get_settings
+from src.infra.milvus_client import get_milvus_client_alias
+from src.infra.milvus_store import MilvusStore
+from src.infra.redis_cache import get_checkpointer_redis
+from dotenv import load_dotenv
+load_dotenv()
+settings = get_settings()
+
+
+def _get_embedding_model():
+    """返回向量化模型。根据你的实际情况替换。"""
+    # 方案A：使用 DashScope（阿里云）
+    from langchain_community.embeddings import DashScopeEmbeddings
+    return DashScopeEmbeddings(model="text-embedding-v3")
+
+    # 方案B：使用 Ollama 本地模型
+    # from langchain_ollama import OllamaEmbeddings
+    # return OllamaEmbeddings(model="nomic-embed-text")
+
+    # 方案C：使用 OpenAI
+    # from langchain_openai import OpenAIEmbeddings
+    # return OpenAIEmbeddings(model="text-embedding-3-small")
 
 async def create_supervisor_agent():
+    """
+    创建带有短期记忆（Redis）和长期记忆（Milvus）的 Supervisor Agent。
+
+    短期记忆：Redis checkpointer，保存当前会话的完整对话历史
+    长期记忆：Milvus store，跨会话的语义记忆，Agent 通过工具主动读写
+    """
+
+    # ── 短期记忆：Redis Checkpointer（复用 infra 层连接）─────────────
+
     # 1. 复用项目已有的 checkpointer 专用 Redis 客户端（bytes 模式）
     redis_client = get_checkpointer_redis()
 
@@ -15,23 +46,46 @@ async def create_supervisor_agent():
     checkpointer = AsyncRedisSaver(redis_client=redis_client)
     await checkpointer.asetup()
 
+
+    # ── 长期记忆：Milvus Store ─────────────────────────────────────────
+    milvus_alias = get_milvus_client_alias()
+    embedding_model = _get_embedding_model()
+    store = MilvusStore(
+        alias=milvus_alias,
+        embeddings=embedding_model,
+        dims=1024,   # DashScope text-embedding-v3 默认输出 1024 维
+    )
+
+    # ── 工具列表 ───────────────────────────────────────────────────────
+    tools = [
+        save_memory,  # 写长期记忆
+        search_memory,  # 读长期记忆
+        # ... 其他工具
+    ]
     # 3. 创建 Agent
     llm = ChatDeepSeek(model="deepseek-chat")
 
+    # ── 创建 Agent ─────────────────────────────────────────────────────
     agent = create_agent(
         model=llm,
-        tools=[],
+        tools=tools,
+        system_prompt=(
+            "你是天宫医疗的智能助手。"
+            "当用户提到重要的个人信息或病史时，使用 save_memory 工具记住它。"
+            "当需要回忆用户历史信息时，使用 search_memory 工具检索。"
+        ),
         middleware=[
-        SummarizationMiddleware(
-            model="deepseek-chat",
-            trigger=[
-                ("tokens", 4000),  # token数达到4k时触发
-                ("messages", 6)  # 或消息数达到 4条时触发
-            ],
-            keep=("messages", 6),  # 摘要后保留最近 4 条消息
-        )
-    ],
-        checkpointer=checkpointer,
+            SummarizationMiddleware(
+                model="deepseek-chat",
+                trigger=[
+                    ("tokens", 4000),  # token数达到4k时触发
+                    ("messages", 6)  # 或消息数达到 4条时触发
+                ],
+                keep=("messages", 6),  # 摘要后保留最近 4 条消息
+            )
+        ],
+        checkpointer=checkpointer, # 短期记忆
+        store=store,  # 长期记忆
     )
     return agent
 
