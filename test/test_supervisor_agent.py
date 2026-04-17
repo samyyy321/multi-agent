@@ -6,14 +6,14 @@ from src.agents.supervisor_agent import chat_endpoint
 
 # @pytest.mark.asyncio
 async def test_supervisor_agent():
-    result = await chat_endpoint("1234","AEEEEA", "你好，我是雷丰阳")
+    result = await chat_endpoint("1234","AEEEEA", "你好，我是sam")
     print(result)
 
 
 async def test_agent_memory():
     """验证短期记忆：同一 thread_id 下第二轮能记住第一轮的内容"""
     # 第一轮：自我介绍
-    reply1 = await chat_endpoint("1123", "ATDAAS", "你好，我叫雷丰阳")
+    reply1 = await chat_endpoint("1123", "ATDAAS", "你好，我叫sam")
     print(f"\n第一轮回复：{reply1}")
 
     # 第二轮：考察记忆

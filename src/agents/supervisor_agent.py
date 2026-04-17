@@ -9,8 +9,37 @@ from src.infra.milvus_client import get_milvus_client_alias
 from src.infra.milvus_store import MilvusStore
 from src.infra.redis_cache import get_checkpointer_redis
 from dotenv import load_dotenv
+from src.agents.worker_tools import WORKER_TOOLS
+
 load_dotenv()
 settings = get_settings()
+
+SUPERVISOR_SYSTEM_PROMPT = """你是医疗系统的智能总助手（Supervisor）。
+
+你的核心职责：
+1. 与患者/医生/运营人员进行多轮对话
+2. 准确识别用户意图，将任务分派给合适的专项助手
+3. 整合专项助手的结果，给出清晰、友好的最终回复
+4. 主动收集必要信息（如症状描述不清时追问）
+5. 管理对话上下文，保持对话连贯性
+
+可调用的专项助手：
+- call_inquiry_agent：智慧问诊（症状分诊、挂号建议）
+- call_knowledge_agent：医学知识问答（疾病科普、治疗方案）
+
+记忆工具：
+- save_memory：将重要信息（病史、过敏史、用药偏好等）保存到长期记忆
+- search_memory：从长期记忆中检索用户历史信息
+
+工作原则：
+- 优先从长期记忆中检索用户历史信息，避免重复询问
+- 遇到复杂问题可以串联多个专项助手（先问诊再查药）
+- 始终以患者安全为第一优先级
+- 对话语气温和、专业、易懂"""
+
+# 剩余忽略：主要是提示词和工具
+ # ── 工具 = 记忆工具 + Worker 工具 ─────────────────────────────────
+tools = [save_memory, search_memory] + WORKER_TOOLS
 
 
 def _get_embedding_model():
@@ -18,14 +47,6 @@ def _get_embedding_model():
     # 方案A：使用 DashScope（阿里云）
     from langchain_community.embeddings import DashScopeEmbeddings
     return DashScopeEmbeddings(model="text-embedding-v3")
-
-    # 方案B：使用 Ollama 本地模型
-    # from langchain_ollama import OllamaEmbeddings
-    # return OllamaEmbeddings(model="nomic-embed-text")
-
-    # 方案C：使用 OpenAI
-    # from langchain_openai import OpenAIEmbeddings
-    # return OpenAIEmbeddings(model="text-embedding-3-small")
 
 async def create_supervisor_agent():
     """

@@ -1,6 +1,7 @@
 # 读取环境变量
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from langchain_openai import ChatOpenAI
 
 class Settings(BaseSettings):
     APP_NAME: str = "tiangong-agent"
@@ -40,6 +41,7 @@ class Settings(BaseSettings):
        # 聊天模型
     BASE_URL_CHAT: str = ""
     DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = ""
     CHAT_MODEL: str = "deepseek-chat"
     EMBEDDING_MODEL: str = "text-embedding-v3"
     VL_MODEL: str = "qwen-vl"
@@ -61,3 +63,13 @@ class Settings(BaseSettings):
 @lru_cache  # lru 把对象实例保存到内存中。这是一种单例的实现
 def get_settings() -> Settings:
     return Settings()
+
+def get_llm(temperature: float = 0.7) -> ChatOpenAI:
+    """创建基于 OpenAI 兼容接口的聊天模型实例。"""
+    settings = get_settings()
+    return ChatOpenAI(
+        model=settings.CHAT_MODEL,
+        api_key=settings.DASHSCOPE_API_KEY,
+        base_url=settings.BASE_URL_CHAT,
+        temperature=temperature,
+    )
