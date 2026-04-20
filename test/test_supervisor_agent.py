@@ -3,6 +3,7 @@ import uuid
 import pytest
 
 from src.agents.supervisor_agent import chat_endpoint
+from src.agents.supervisor_agent import create_supervisor_agent
 
 # @pytest.mark.asyncio
 async def test_supervisor_agent():
@@ -51,3 +52,31 @@ async def test_agent_store():
     print(f"[检索] 回复：{resp2}")
 
     assert "糖尿病" in resp2, f"长期记忆应能跨会话检索到糖尿病史，实际回复：{resp2}"
+
+async def test_supervisor():
+    agent = await create_supervisor_agent()
+    config = {"configurable": {"thread_id": "test_001"}}
+
+    # 第一轮：问诊场景 → 应触发 call_inquiry_agent
+    r1 = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "我最近头疼发烧，不知道该挂什么科"}]},
+        config=config,
+    )
+    print("=== 第一轮（问诊）===")
+    print(r1["messages"][-1].content)
+
+    # 第二轮：药物场景 → 应触发 call_drug_agent
+    r2 = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "医生开了布洛芬和阿莫西林，可以一起吃吗？"}]},
+        config=config,
+    )
+    print("=== 第二轮（药物）===")
+    print(r2["messages"][-1].content)
+
+    # 第三轮：知识问答 → 应触发 call_knowledge_agent
+    r3 = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "感冒一般多久能好？"}]},
+        config=config,
+    )
+    print("=== 第三轮（知识）===")
+    print(r3["messages"][-1].content)
