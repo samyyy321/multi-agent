@@ -66,3 +66,22 @@ async def extract_and_normalize_symptoms(
         # 此时静默降级，返回空列表，由后续层处理
         logger.warning(f"LLM 结构化输出失败，降级为空列表: {e}")
         return []
+
+async def match_symptoms_in_neo4j(
+    symptoms: list[str],
+    neo4j_driver: AsyncDriver,
+) -> tuple[list[str], list[str]]:
+    """第二层：Neo4j 精确匹配。返回 (命中列表, 未命中列表)。"""
+    if not symptoms:
+        return [], []
+    async with neo4j_driver.session() as session:
+        result = await session.run(
+            "MATCH (s:Symptom) WHERE s.name IN $names RETURN s.name AS name",
+            names=symptoms,
+        )
+        records = await result.data()
+        matched_set = {r["name"] for r in records}
+    matched = [s for s in symptoms if s in matched_set]
+    unmatched = [s for s in symptoms if s not in matched_set]
+    logger.debug(f"Neo4j 精确匹配: 命中={matched}, 未命中={unmatched}")
+    return matched, unmatched
