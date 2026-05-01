@@ -85,3 +85,45 @@ async def match_symptoms_in_neo4j(
     unmatched = [s for s in symptoms if s not in matched_set]
     logger.debug(f"Neo4j 精确匹配: 命中={matched}, 未命中={unmatched}")
     return matched, unmatched
+
+SIMILARITY_THRESHOLD = 0.85  # 低于此值视为真正的图谱外症状
+
+
+async def semantic_match_symptoms(
+    unmatched_symptoms: list[str],
+    embedding_model: Embeddings,
+    milvus_client: MilvusClient,
+) -> tuple[dict[str, str], list[str]]:
+    """
+    第三层：Milvus 语义相似度兜底。
+    返回 (mapped={用户原词: 图谱标准词}, still_unmatched=真正图谱外症状)。
+    """
+    if not unmatched_symptoms:
+        return {}, []
+    # 批量向量化，减少 API 调用次数
+    query_embeddings = await embedding_model.aembed_documents(unmatched_symptoms)
+    mapped: dict[str, str] = {}
+    still_unmatched: list[str] = []
+    for symptom, query_vec in zip(unmatched_symptoms, query_embeddings):
+        try:
+            results = milvus_client.search(
+                collection_name="symptom_index",
+                data=[query_vec],
+                limit=1,
+                output_fields=["name"],
+            )
+            if results and results[0]:
+                top_hit = results[0][0]
+                score = top_hit["distance"]  # COSINE 相似度，越高越相似
+                if score >= SIMILARITY_THRESHOLD:
+                    std_name = top_hit["entity"]["name"]
+                    mapped[symptom] = std_name
+                    logger.debug(f"语义映射: '{symptom}' → '{std_name}' (score={score:.3f})")
+                else:
+                    still_unmatched.append(symptom)
+            else:
+                still_unmatched.append(symptom)
+        except Exception as e:
+            logger.warning(f"Milvus 语义匹配失败 '{symptom}': {e}")
+            still_unmatched.append(symptom)
+    return mapped, still_unmatched
