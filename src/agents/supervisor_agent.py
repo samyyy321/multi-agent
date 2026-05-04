@@ -46,7 +46,9 @@ def _get_embedding_model():
     """返回向量化模型。根据你的实际情况替换。"""
     # 方案A：使用 DashScope（阿里云）
     from langchain_community.embeddings import DashScopeEmbeddings
-    return DashScopeEmbeddings(model="text-embedding-v3")
+    return DashScopeEmbeddings(model=settings.EMBEDDING_MODEL, 
+            dashscope_api_key=settings.DASHSCOPE_API_KEY
+        )
 
 async def create_supervisor_agent():
     """

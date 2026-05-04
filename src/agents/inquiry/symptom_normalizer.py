@@ -127,3 +127,36 @@ async def semantic_match_symptoms(
             logger.warning(f"Milvus 语义匹配失败 '{symptom}': {e}")
             still_unmatched.append(symptom)
     return mapped, still_unmatched
+
+
+async def normalize_symptoms(
+    user_input: str,
+    llm: BaseChatModel,
+    neo4j_driver: AsyncDriver,
+    embedding_model: Embeddings,
+    milvus_client: MilvusClient,
+) -> dict:
+    """
+    完整三层症状标准化流水线入口。
+
+    Returns:
+        matched      : 直接命中 Neo4j 的标准症状列表
+        mapped       : {用户原词: 图谱标准词}，语义兜底后的映射
+        unmatched    : 真正的图谱外症状（供医生参考）
+        all_standard : matched + mapped.values()，用于后续 Neo4j 查询
+    """
+    normalized = await extract_and_normalize_symptoms(user_input, llm)
+    if not normalized:
+        return {"matched": [], "mapped": {}, "unmatched": [], "all_standard": []}
+
+    matched, unmatched_after_exact = await match_symptoms_in_neo4j(normalized, neo4j_driver)
+    mapped, still_unmatched = await semantic_match_symptoms(
+        unmatched_after_exact, embedding_model, milvus_client
+    )
+    all_standard = matched + list(mapped.values())
+    return {
+        "matched": matched,
+        "mapped": mapped,
+        "unmatched": still_unmatched,
+        "all_standard": all_standard,
+    }
