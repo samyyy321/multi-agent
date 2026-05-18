@@ -1,11 +1,23 @@
 from __future__ import annotations
 import json
 from typing import Any
-from src.core.config import get_settings
+
 from loguru import logger
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+
+from src.core.config import get_settings
 from src.agents.inquiry.state import (
     InquiryState, InquiryPhase, InquiryHandoffPayload, PatientContext
 )
+
+from src.agents.inquiry.confidence import apply_context_weights, check_convergence
+from src.agents.inquiry.prompts import (
+    CLARIFY_PROMPT, ASK_SYMPTOMS_PROMPT, PARSE_ANSWER_PROMPT,
+    CONCLUSION_PROMPT, EMERGENCY_CHECK_PROMPT
+)
+
+
 
 # ── 依赖注入容器（在 graph 编译时注入，避免全局单例） ──────────────────────
 class InquiryDeps:
@@ -55,3 +67,48 @@ async def node_load_context(state: InquiryState, deps: InquiryDeps) -> dict:
                 merged_ctx.age, merged_ctx.gender,
                 len(merged_ctx.medical_history), len(merged_ctx.allergy_history))
     return {"patient_context": merged_ctx}
+
+async def node_check_emergency(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点②：急症识别。
+    仅在第一轮执行。识别到急症时直接跳转到 CONCLUDE 阶段，
+    并在 candidate_diseases 中放入一个特殊的"急诊"标记。
+    """
+    if state.round > 0:
+        logger.debug("节点②急症识别 非首轮，跳过急症检查")
+        return {}
+
+    logger.info("节点②急症识别 开始急症识别检查")
+    last_user_msg = ""
+    for msg in reversed(state.messages):  # 历史消息： 1-2-3-4-5-6
+        if isinstance(msg, HumanMessage):
+            last_user_msg = msg.content
+            break
+
+    if not last_user_msg:
+        return {}
+
+    prompt = EMERGENCY_CHECK_PROMPT.format(user_input=last_user_msg)
+    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+    try:
+        content = response.content.strip()
+        if "```" in content:
+            content = content.split("```")[1].lstrip("json").strip()
+        result = json.loads(content)
+        if result.get("is_emergency"):
+            logger.warning("节点②急症识别 ⚠️ 检测到急症！原因: {}", result.get('reason', ''))
+            emergency_reply = (
+                "⚠️ 根据您描述的症状，这可能是紧急情况！\n\n"
+                f"原因：{result.get('reason', '存在急症风险')}\n\n"
+                "**请立即前往最近医院的急诊科就诊，或拨打 120 急救电话。**\n\n"
+                "不要等待，请立即行动！"
+            )
+            return {
+                "phase": InquiryPhase.END,
+                "messages": [AIMessage(content=emergency_reply)],
+            }
+        else:
+            logger.info("节点②急症识别 未检测到急症，继续正常问诊流程")
+    except Exception as e:
+        logger.warning(f"急症识别解析失败: {e}")
+    return {}
