@@ -11,6 +11,10 @@ from src.agents.inquiry.state import (
     InquiryState, InquiryPhase, InquiryHandoffPayload, PatientContext
 )
 
+from src.agents.inquiry.symptom_normalizer import (
+    normalize_symptoms
+)
+
 from src.agents.inquiry.confidence import apply_context_weights, check_convergence
 from src.agents.inquiry.prompts import (
     CLARIFY_PROMPT, ASK_SYMPTOMS_PROMPT, PARSE_ANSWER_PROMPT,
@@ -112,3 +116,49 @@ async def node_check_emergency(state: InquiryState, deps: InquiryDeps) -> dict:
     except Exception as e:
         logger.warning(f"急症识别解析失败: {e}")
     return {}
+
+
+async def node_extract_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点③：症状标准化。
+    从最新的用户消息中提取症状，经三层标准化后合并到 confirmed_symptoms。
+    """
+    last_user_msg = ""
+    for msg in reversed(state.messages):
+        if isinstance(msg, HumanMessage):
+            last_user_msg = msg.content
+            break
+
+    if not last_user_msg:
+        logger.warning("节点③症状标准化 未找到用户消息，跳过症状提取")
+        return {}
+
+    logger.info("节点③症状标准化 开始提取症状 | 用户输入: {!r}", last_user_msg[:80])
+
+    # 等待标准化三层管线执行
+    result = await normalize_symptoms(
+        user_input=last_user_msg,
+        llm=deps.llm,
+        neo4j_driver=deps.neo4j_driver,
+        embedding_model=deps.embedding_model,
+        milvus_client=deps.milvus_client,
+    )
+
+    new_confirmed = list(set(state.confirmed_symptoms) | set(result["all_standard"]))
+    new_unmatched = list(set(state.unmatched_symptoms) | set(result["unmatched"]))
+
+    logger.info("节点③症状标准化 提取完成 | 标准化症状={} 未匹配={} 累计确认={}",
+                result["all_standard"], result["unmatched"], new_confirmed)
+
+    if new_confirmed:
+        return {
+            "confirmed_symptoms": new_confirmed,
+            "unmatched_symptoms": new_unmatched,
+            "phase": InquiryPhase.GRAPH_QUERY, # 接下来进入哪个阶段
+        }
+    else:
+        logger.info("节点③症状标准化 无法提取明确症状，进入澄清流程")
+        return {
+            "unmatched_symptoms": new_unmatched,
+            "phase": InquiryPhase.CLARIFY,
+        }
