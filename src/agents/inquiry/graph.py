@@ -162,3 +162,68 @@ async def node_extract_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
             "unmatched_symptoms": new_unmatched,
             "phase": InquiryPhase.CLARIFY,
         }
+
+async def node_clarify(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点④：澄清模糊描述。
+    当用户描述没有明确症状时，引导用户进一步描述。
+    """
+    last_user_msg = ""
+    for msg in reversed(state.messages):
+        if isinstance(msg, HumanMessage):
+            last_user_msg = msg.content
+            break
+
+    logger.info("节点④澄清模糊描述 用户描述模糊，发起澄清引导 | round={}", state.round)
+    prompt = CLARIFY_PROMPT.format(user_input=last_user_msg)
+    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+    logger.debug("节点④澄清模糊描述 澄清回复已生成，等待用户下一轮输入")
+    return {
+        "round": state.round + 1,
+        "messages": [AIMessage(content=response.content)],
+    }
+
+
+async def node_query_neo4j(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点⑤：查询 Neo4j 候选疾病。
+    用已确认症状查候选疾病，补充详情，应用上下文权重。
+    """
+    logger.info("节点⑤查询候选疾病 查询候选疾病 | 确认症状={}", state.confirmed_symptoms)
+    candidates = await query_candidate_diseases(
+        confirmed_symptoms=state.confirmed_symptoms,
+        neo4j_driver=deps.neo4j_driver,
+    )
+    if candidates:
+        candidates = await enrich_candidate_details(candidates, deps.neo4j_driver)
+        candidates = apply_context_weights(
+            candidates, state.patient_context, state.denied_symptoms
+        )
+        logger.info("节点⑤查询候选疾病 候选疾病 top5: {}",
+                    [(c.name, round(c.confidence, 3)) for c in candidates[:5]])
+    else:
+        logger.warning("节点⑤查询候选疾病 未找到候选疾病，将强制结束问诊")
+
+    # 收敛判断（要么超10轮，要么有候选疾病，要么没有更多有用信息）
+    should_conclude, force_conclude = check_convergence(candidates, state.round)
+    logger.info("节点⑤查询候选疾病 收敛判断 | should_conclude={} force_conclude={} round={}",
+                should_conclude, force_conclude, state.round)
+
+    if should_conclude:
+        return {
+            "candidate_diseases": candidates,
+            "phase": InquiryPhase.CONCLUDE,
+            "force_conclude": force_conclude,
+        }
+    elif not candidates:
+        # 没有候选疾病（症状太罕见），直接结束
+        return {
+            "candidate_diseases": [],
+            "phase": InquiryPhase.CONCLUDE,
+            "force_conclude": True,
+        }
+    else:
+        return {
+            "candidate_diseases": candidates,
+            "phase": InquiryPhase.SYMPTOM_CONFIRM,
+        }
