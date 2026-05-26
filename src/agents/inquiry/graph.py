@@ -21,7 +21,9 @@ from src.agents.inquiry.prompts import (
     CONCLUSION_PROMPT, EMERGENCY_CHECK_PROMPT
 )
 
-
+from src.agents.inquiry.neo4j_queries import (
+    query_candidate_diseases, enrich_candidate_details, get_pending_symptoms
+)
 
 # ── 依赖注入容器（在 graph 编译时注入，避免全局单例） ──────────────────────
 class InquiryDeps:
