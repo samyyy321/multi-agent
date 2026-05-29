@@ -160,3 +160,47 @@ async def normalize_symptoms(
         "unmatched": still_unmatched,
         "all_standard": all_standard,
     }
+    
+    
+    
+
+# ── 反向处理：标准术语 → 口语（追问时使用） ──────────────────────────────
+SYMPTOM_HUMANIZE_PROMPT = """将以下医学症状术语转换为患者容易理解的口语表达。
+
+症状列表：{symptoms}
+
+要求：
+- 简洁易懂，避免专业术语
+- 可以加括号补充解释，帮助患者理解
+- 输出 JSON 数组，与输入顺序一一对应
+
+示例：
+输入：["发热", "心悸", "呼吸困难"]
+输出：["发烧", "心跳加速或心慌", "喘不上气或胸闷"]"""
+
+
+async def humanize_symptoms(
+    symptoms: list[str],
+    llm: BaseChatModel,
+) -> list[str]:
+    """
+    将标准医学术语转换为患者易懂的口语（用于追问时的友好表达）。
+    失败时静默降级，直接返回原术语，不影响主流程。
+    """
+    if not symptoms:
+        return []
+    prompt = SYMPTOM_HUMANIZE_PROMPT.format(
+        symptoms=json.dumps(symptoms, ensure_ascii=False)
+    )
+    response = await llm.ainvoke([SystemMessage(content=prompt)])
+    try:
+        content = response.content.strip()
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        result = json.loads(content.strip())
+        # 长度不一致说明 LLM 输出有问题，退回原词
+        return result if len(result) == len(symptoms) else symptoms
+    except Exception:
+        return symptoms

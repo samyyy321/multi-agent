@@ -12,7 +12,7 @@ from src.agents.inquiry.state import (
 )
 
 from src.agents.inquiry.symptom_normalizer import (
-    normalize_symptoms
+    normalize_symptoms, humanize_symptoms
 )
 
 from src.agents.inquiry.confidence import apply_context_weights, check_convergence
@@ -229,3 +229,41 @@ async def node_query_neo4j(state: InquiryState, deps: InquiryDeps) -> dict:
             "candidate_diseases": candidates,
             "phase": InquiryPhase.SYMPTOM_CONFIRM,
         }
+        
+
+async def node_ask_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点⑥：生成追问话术。
+    从候选疾病中选出区分度最高的 ≤3 个症状，口语化后追问用户。
+    """
+    logger.info("节点⑥生成追问话术 生成追问 | round={} 已问症状={}", state.round, state.asked_symptoms)
+    pending = await get_pending_symptoms(
+        candidates=state.candidate_diseases,
+        confirmed_symptoms=state.confirmed_symptoms,
+        denied_symptoms=state.denied_symptoms,
+        asked_symptoms=state.asked_symptoms,
+    )
+
+    # 取区分度最高的前 3 个（出现次数最少的）
+    top_symptoms = [s for s, _ in pending[:3]]
+
+    if not top_symptoms:
+        # 没有更多可问的症状，直接收敛
+        logger.info("节点⑥生成追问话术 无更多可追问症状，直接进入结论")
+        return {"phase": InquiryPhase.CONCLUDE}
+
+    logger.info("节点⑥生成追问话术 本轮追问症状: {}", top_symptoms)
+    # 口语化
+    human_symptoms = await humanize_symptoms(top_symptoms, deps.llm)
+
+    prompt = ASK_SYMPTOMS_PROMPT.format(
+        symptoms_to_ask="\n".join(f"- {s}" for s in human_symptoms)
+    )
+    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+
+    return {
+        "round": state.round + 1,
+        "asked_symptoms": state.asked_symptoms + top_symptoms,
+        "pending_ask_symptoms": top_symptoms,  # 记录本轮问了哪些，供下一节点解析
+        "messages": [AIMessage(content=response.content)],
+    }
