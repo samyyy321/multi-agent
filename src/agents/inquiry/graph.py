@@ -267,3 +267,52 @@ async def node_ask_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
         "pending_ask_symptoms": top_symptoms,  # 记录本轮问了哪些，供下一节点解析
         "messages": [AIMessage(content=response.content)],
     }
+    
+    
+async def node_parse_answer(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点⑦：解析用户对追问的回答。
+    判断用户确认/否认了哪些症状，更新 confirmed_symptoms 和 denied_symptoms。
+    """
+    last_user_msg = ""
+    for msg in reversed(state.messages):
+        if isinstance(msg, HumanMessage):
+            last_user_msg = msg.content
+            break
+
+    if not last_user_msg or not state.pending_ask_symptoms:
+        logger.debug("节点⑦解析用户回答 无用户消息或无待解析症状，跳过")
+        return {}
+
+    logger.info("节点⑦解析用户回答 解析用户回答 | 待解析症状={} 用户回答={!r}",
+                state.pending_ask_symptoms, last_user_msg[:80])
+
+    prompt = PARSE_ANSWER_PROMPT.format(
+        asked_symptoms=", ".join(state.pending_ask_symptoms),
+        user_answer=last_user_msg,
+    )
+    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+
+    try:
+        content = response.content.strip()
+        if "```" in content:
+            content = content.split("```")[1].lstrip("json").strip()
+        parsed = json.loads(content)
+        new_confirmed = list(
+            set(state.confirmed_symptoms) | set(parsed.get("confirmed", []))
+        )
+        new_denied = list(
+            set(state.denied_symptoms) | set(parsed.get("denied", []))
+        )
+        logger.info("节点⑦解析用户回答 解析结果 | 新增确认={} 新增否认={}",
+                    parsed.get("confirmed", []), parsed.get("denied", []))
+    except Exception as e:
+        logger.warning(f"解析用户回答失败: {e}")
+        new_confirmed = state.confirmed_symptoms
+        new_denied = state.denied_symptoms
+
+    return {
+        "confirmed_symptoms": new_confirmed,
+        "denied_symptoms": new_denied,
+        "pending_ask_symptoms": [],
+    }
