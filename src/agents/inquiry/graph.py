@@ -316,3 +316,91 @@ async def node_parse_answer(state: InquiryState, deps: InquiryDeps) -> dict:
         "denied_symptoms": new_denied,
         "pending_ask_symptoms": [],
     }
+    
+    
+async def node_conclude(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点⑧：生成诊断结论。
+    整合所有信息，生成用户可读的结论文案，并构建 HandoffPayload。
+    """
+    candidates = state.candidate_diseases
+    if not candidates:
+        logger.warning("节点⑧生成诊断结论 无候选疾病，返回无结果提示")
+        no_result_msg = (
+            "根据您描述的症状，我暂时无法在知识库中找到匹配的疾病。\n\n"
+            "这可能是因为症状较为罕见，或者需要更多信息。\n"
+            "建议您直接前往医院就诊，由医生进行面诊。"
+        )
+        return {
+            "phase": InquiryPhase.END,
+            "messages": [AIMessage(content=no_result_msg)],
+        }
+
+    top1 = candidates[0]
+    suspected = [c.name for c in candidates[1:5]]
+    logger.info("节点⑧生成诊断结论 生成诊断结论 | 主诊断={} 置信度={:.3f} 科室={} 疑似={}",
+                top1.name, top1.confidence, top1.department, suspected)
+
+    prompt = CONCLUSION_PROMPT.format(
+        confirmed_symptoms="、".join(state.confirmed_symptoms) or "暂无",
+        primary_disease=top1.name,
+        confidence=top1.confidence,
+        suspected_diseases="、".join(suspected) if suspected else "无",
+        department=top1.department or "综合内科",
+        checks="、".join(top1.checks[:5]) if top1.checks else "暂无",
+        force_conclude=state.force_conclude,
+    )
+    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+
+    # 构建移交数据包（挂号数据包）
+    handoff = InquiryHandoffPayload(
+        patient_id=state.patient_context.patient_id,
+        patient_context=state.patient_context.model_dump(),
+        confirmed_symptoms=state.confirmed_symptoms,
+        denied_symptoms=state.denied_symptoms,
+        unmatched_symptoms=state.unmatched_symptoms,
+        primary_disease=top1.name,
+        primary_confidence=top1.confidence,
+        suspected_diseases=suspected,
+        department=top1.department or "综合内科",
+        recommended_checks=top1.checks[:5],
+        total_rounds=state.round,
+        session_id=state.session_id,
+    )
+
+    return {
+        "phase": InquiryPhase.HANDOFF,
+        "handoff_payload": handoff,
+        "messages": [AIMessage(content=response.content)],
+    }
+
+
+async def node_save_record(state: InquiryState, deps: InquiryDeps) -> dict:
+    """
+    节点⑨：保存问诊记录到 PostgreSQL。
+    无论用户是否同意挂号都执行。
+    """
+    if not state.handoff_payload:
+        logger.warning("节点⑨保存问诊记录 无 handoff_payload，跳过保存")
+        return {"phase": InquiryPhase.END}
+
+    from src.agents.inquiry.db_queries import save_consultation_record
+    payload = state.handoff_payload
+    chief_complaint = "、".join(state.confirmed_symptoms[:5])
+    # user_id 即 patients.id，转 int 后写入外键
+    patient_id = int(payload.patient_id) if payload.patient_id else None
+
+    logger.info("节点⑨保存问诊记录 保存问诊记录 | patient_id={} diagnosis={} department={}",
+                patient_id, payload.primary_disease, payload.department)
+
+    await save_consultation_record(
+        patient_id=patient_id,
+        session_id=payload.session_id,
+        chief_complaint=chief_complaint,
+        diagnosis=payload.primary_disease,
+        department_name=payload.department,
+        urgency_level="normal",
+        db=deps.db_session,
+    )
+    logger.info("节点⑨保存问诊记录 问诊记录保存完成，流程结束")
+    return {"phase": InquiryPhase.END}
