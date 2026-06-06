@@ -1,29 +1,35 @@
+
 from __future__ import annotations
 import json
 from typing import Any
 
 from loguru import logger
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_deepseek import ChatDeepSeek
+from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+from pymilvus import MilvusClient
 
+from src.infra.milvus_client import get_milvus_client_alias
+from src.infra.neo4j_client import get_neo4j_driver
 from src.core.config import get_settings
 from src.agents.inquiry.state import (
     InquiryState, InquiryPhase, InquiryHandoffPayload, PatientContext
 )
-
 from src.agents.inquiry.symptom_normalizer import (
     normalize_symptoms, humanize_symptoms
 )
-
+from src.agents.inquiry.neo4j_queries import (
+    query_candidate_diseases, enrich_candidate_details, get_pending_symptoms
+)
 from src.agents.inquiry.confidence import apply_context_weights, check_convergence
 from src.agents.inquiry.prompts import (
     CLARIFY_PROMPT, ASK_SYMPTOMS_PROMPT, PARSE_ANSWER_PROMPT,
     CONCLUSION_PROMPT, EMERGENCY_CHECK_PROMPT
 )
 
-from src.agents.inquiry.neo4j_queries import (
-    query_candidate_diseases, enrich_candidate_details, get_pending_symptoms
-)
+settings = get_settings()
 
 # ── 依赖注入容器（在 graph 编译时注入，避免全局单例） ──────────────────────
 class InquiryDeps:
@@ -404,3 +410,212 @@ async def node_save_record(state: InquiryState, deps: InquiryDeps) -> dict:
     )
     logger.info("节点⑨保存问诊记录 问诊记录保存完成，流程结束")
     return {"phase": InquiryPhase.END}
+
+
+# src/agents/inquiry/graph.py （续）
+
+# ════════════════════════════════════════════════════════════════════════
+# 路由函数（决定下一个节点）
+# ════════════════════════════════════════════════════════════════════════
+
+def route_dispatcher(state: InquiryState) -> str:
+    """入口分发：首轮走完整流程，后续轮次根据上一轮状态决定入口。"""
+    if state.round == 0:
+        return "load_context"
+    # 上一轮是追问症状（pending_ask_symptoms 非空）→ 解析用户回答
+    if state.pending_ask_symptoms:
+        return "parse_answer"
+    # 上一轮是澄清引导（pending_ask_symptoms 为空）→ 提取新症状
+    return "extract_symptoms"
+
+
+def route_after_emergency(state: InquiryState) -> str:
+    """急症检查后的路由：急症直接结束，否则提取症状。"""
+    if state.phase == InquiryPhase.END:
+        return END
+    return "extract_symptoms"
+
+
+def route_after_extract(state: InquiryState) -> str:
+    """症状提取后的路由：有症状查图谱，没症状澄清。"""
+    if state.phase == InquiryPhase.GRAPH_QUERY:
+        return "query_neo4j"
+    return "clarify"
+
+
+def route_after_neo4j(state: InquiryState) -> str:
+    """Neo4j 查询后的路由：收敛则结论，否则追问。"""
+    if state.phase == InquiryPhase.CONCLUDE:
+        return "conclude"
+    return "ask_symptoms"
+
+
+def route_after_ask(state: InquiryState) -> str:
+    """追问后的路由：没有更多症状可问则直接结论。"""
+    if state.phase == InquiryPhase.CONCLUDE:
+        return "conclude"
+    return END  # 等待用户回答（下一轮消息进来后从 parse_answer 继续）
+
+
+def route_after_parse(state: InquiryState) -> str:
+    """解析回答后：重新查 Neo4j 更新候选疾病。"""
+    return "query_neo4j"
+
+
+def route_after_conclude(state: InquiryState) -> str:
+    """结论后：保存记录，结束。"""
+    if state.phase == InquiryPhase.END:
+        return END
+    return "save_record"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 图的组装
+# ════════════════════════════════════════════════════════════════════════
+
+def build_inquiry_graph(deps: InquiryDeps):
+    """
+    构建并编译问诊 StateGraph。
+    deps 通过闭包注入到每个节点函数中。
+    """
+    # 用闭包把 deps 绑定到节点函数
+    async def _load_context(state):    return await node_load_context(state, deps)
+    async def _check_emergency(state): return await node_check_emergency(state, deps)
+    async def _extract_symptoms(state):return await node_extract_symptoms(state, deps)
+    async def _clarify(state):         return await node_clarify(state, deps)
+    async def _query_neo4j(state):     return await node_query_neo4j(state, deps)
+    async def _ask_symptoms(state):    return await node_ask_symptoms(state, deps)
+    async def _parse_answer(state):    return await node_parse_answer(state, deps)
+    async def _conclude(state):        return await node_conclude(state, deps)
+    async def _save_record(state):     return await node_save_record(state, deps)
+
+    graph = StateGraph(InquiryState)
+
+    # 注册节点（dispatcher 是无操作的分发节点，仅用于路由）
+    graph.add_node("dispatcher",       lambda state: {})
+    graph.add_node("load_context",     _load_context)
+    graph.add_node("check_emergency",  _check_emergency)
+    graph.add_node("extract_symptoms", _extract_symptoms)
+    graph.add_node("clarify",          _clarify)
+    graph.add_node("query_neo4j",      _query_neo4j)
+    graph.add_node("ask_symptoms",     _ask_symptoms)
+    graph.add_node("parse_answer",     _parse_answer)
+    graph.add_node("conclude",         _conclude)
+    graph.add_node("save_record",      _save_record)
+
+    # 入口：dispatcher 根据 round 分发到首轮流程或后续轮次流程
+    graph.set_entry_point("dispatcher")
+
+    # 注册边（固定边）
+    graph.add_edge("load_context", "check_emergency")
+    graph.add_edge("clarify", END)          # 澄清后等待用户回复
+    graph.add_edge("save_record", END)
+
+    # 注册条件边（路由）
+    graph.add_conditional_edges("dispatcher",       route_dispatcher,
+                                 {"load_context": "load_context", "parse_answer": "parse_answer",
+                                  "extract_symptoms": "extract_symptoms"})
+    graph.add_conditional_edges("check_emergency",  route_after_emergency,
+                                 {"extract_symptoms": "extract_symptoms", END: END})
+    graph.add_conditional_edges("extract_symptoms", route_after_extract,
+                                 {"query_neo4j": "query_neo4j", "clarify": "clarify"})
+    graph.add_conditional_edges("query_neo4j",      route_after_neo4j,
+                                 {"conclude": "conclude", "ask_symptoms": "ask_symptoms"})
+    graph.add_conditional_edges("ask_symptoms",     route_after_ask,
+                                 {"conclude": "conclude", END: END})
+    graph.add_conditional_edges("parse_answer",     route_after_parse,
+                                 {"query_neo4j": "query_neo4j"})
+    graph.add_conditional_edges("conclude",         route_after_conclude,
+                                 {"save_record": "save_record", END: END})
+    return graph.compile()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 对外接口：供 call_inquiry_agent 工具调用
+# ════════════════════════════════════════════════════════════════════════
+
+async def run_inquiry(
+    user_message: str,
+    thread_id: str,
+    deps: InquiryDeps,
+    existing_state: InquiryState | None = None,
+    user_id: str | None = None,
+    long_term_memories: list[str] | None = None,
+) -> tuple[str, InquiryState]:
+    """
+    执行一轮问诊对话。
+
+    Args:
+        user_message      : 用户本轮输入
+        thread_id        : thread_id（用于关联 Redis 和 PostgreSQL 记录）
+        deps              : 依赖注入容器
+        existing_state    : 上一轮的状态（多轮对话时传入）
+        user_id           : 来自 UserContext 的用户 ID，贯穿整个问诊流程
+        long_term_memories: Supervisor 从 Milvus 检索到的长期记忆摘要
+
+    Returns:
+        (assistant_reply, new_state)
+    """
+    graph = build_inquiry_graph(deps)
+
+    if existing_state is None:
+        # 首轮：初始化状态
+        state = InquiryState(
+            session_id=thread_id,
+            patient_context=PatientContext(
+                patient_id=user_id,
+                long_term_memories=long_term_memories or [],
+            ),
+        )
+    else:
+        state = existing_state
+
+    # 追加用户消息
+    state.messages.append(HumanMessage(content=user_message))
+
+    logger.info("▶ run_inquiry 开始 | session={} round={} entry={} user_id={}",
+                thread_id, state.round,
+                "load_context" if state.round == 0 else "parse_answer", user_id)
+
+    # 执行图（dispatcher 节点会根据 round 自动路由到正确的入口）
+    config = {"configurable": {"thread_id": thread_id}}
+    result = await graph.ainvoke(state, config=config)
+
+    new_state = InquiryState(**result) if isinstance(result, dict) else result
+
+    # 取最后一条 AI 消息作为回复
+    reply = ""
+    for msg in reversed(new_state.messages):
+        if isinstance(msg, AIMessage):
+            reply = msg.content
+            break
+
+    logger.info("◀ run_inquiry 完成 | session={} phase={} round={} reply_len={}",
+                thread_id, new_state.phase, new_state.round, len(reply))
+    return reply, new_state
+def build_inquiry_deps(db_session=None) -> InquiryDeps:
+    """
+    构建问诊依赖注入容器的工厂函数。
+    供 call_inquiry_agent 工具和 FastAPI 路由共用，避免重复代码。
+    """
+    llm = ChatDeepSeek(
+        model=settings.CHAT_MODEL,
+        api_key=settings.DEEPSEEK_API_KEY,
+        temperature=0.3,
+    )
+    embedding_model = DashScopeEmbeddings(
+        model=settings.EMBEDDING_MODEL,
+        dashscope_api_key=settings.DASHSCOPE_API_KEY,
+    )
+    neo4j_driver = get_neo4j_driver()
+    get_milvus_client_alias()  # 确保连接已建立
+    milvus_client = MilvusClient(
+        uri=f"http://{settings.MILVUS_HOST}:{settings.MILVUS_PORT}"
+    )
+    return InquiryDeps(
+        llm=llm,
+        neo4j_driver=neo4j_driver,
+        embedding_model=embedding_model,
+        milvus_client=milvus_client,
+        db_session=db_session,
+    )
