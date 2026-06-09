@@ -1,45 +1,65 @@
-# src/agents/workers/inquiry_agent.py
-
+#-----------------------------------
+#       此模块负责处理问诊移交数据包，执行挂号流程，不再是问诊流程的Agent，问诊流程
+#       搬移至worker_tools.py中
+#-----------------------------------
 from langchain.agents import create_agent
-from langchain_core.tools import tool
-from src.core.config import get_llm
+from langchain_deepseek import ChatDeepSeek
 
-INQUIRY_SYSTEM_PROMPT = """你是医疗智慧问诊助手。
+from src.core.config import get_settings
+from src.agents.inquiry.state import InquiryHandoffPayload
+
+settings = get_settings()
+
+INQUIRY_WORKER_PROMPT = """你是天宫医疗的挂号助手。
+
+你已经收到了智能问诊的结论，现在需要帮助患者完成挂号预约。
+
+问诊结论：
+{handoff_payload}
 
 你的职责：
-1. 根据患者描述的症状，进行智能分诊
-2. 判断患者应该挂哪个科室
-3. 如有必要，主动追问关键症状信息
-4. 评估病情紧急程度（紧急/普通/可预约）
+1. 向患者确认挂号信息（科室、时间偏好）
+2. 生成问诊单摘要（供医生参考）
+3. 完成预约挂号（调用挂号工具，待接入）
 
-回复格式：
-- 分诊科室：xxx科
-- 紧急程度：xxx
-- 建议：xxx
-
-注意：你只负责分诊建议，不做最终诊断。"""
+请用温和、专业的语气与患者沟通。"""
 
 
-def create_inquiry_agent():
-    llm = get_llm(temperature=0.3)
-
-    # 当前阶段：无工具，纯 LLM 推理
-    # 未来可添加：患者历史记录查询工具、HyDE 检索工具、预约挂号工具
-    tools = []
-
-    return create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=INQUIRY_SYSTEM_PROMPT,
-        name="inquiry_agent",
+def get_llm():
+    return ChatDeepSeek(
+        model=settings.CHAT_MODEL,
+        api_key=settings.DEEPSEEK_API_KEY,
+        temperature=0.3,
     )
 
 
-# 模块级单例
-_inquiry_agent = None
+def create_inquiry_worker_agent():
+    llm = get_llm()
+    # 当前阶段：无工具，纯 LLM 推理
+    # 未来可添加：预约挂号工具、问诊单生成工具、排班查询工具
+    tools = []
+    return create_agent(model=llm, tools=tools)
 
-def get_inquiry_agent():
-    global _inquiry_agent
-    if _inquiry_agent is None:
-        _inquiry_agent = create_inquiry_agent()
-    return _inquiry_agent
+
+_inquiry_worker_agent = None
+
+def get_inquiry_worker_agent():
+    global _inquiry_worker_agent
+    if _inquiry_worker_agent is None:
+        _inquiry_worker_agent = create_inquiry_worker_agent()
+    return _inquiry_worker_agent
+
+
+async def handle_handoff(payload: InquiryHandoffPayload) -> str:
+    """
+    接收问诊移交数据包，执行挂号流程。
+    返回给用户的挂号确认消息。
+    """
+    agent = get_inquiry_worker_agent()
+    prompt = INQUIRY_WORKER_PROMPT.format(
+        handoff_payload=payload.model_dump_json(indent=2, ensure_ascii=False)
+    )
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": prompt}]}
+    )
+    return result["messages"][-1].content
