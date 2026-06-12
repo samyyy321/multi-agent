@@ -20,7 +20,7 @@ from src.core.logger import setup_logger
 from src.infra.database import engine
 from src.infra.redis_cache import get_redis_client
 from loguru import logger
-
+from src.api.routers.chat import router as chat_router
 
 
 # 使用上下文管理器感知项目的生命周期
@@ -83,6 +83,7 @@ def create_app() -> FastAPI:
 
     # 注册路由
     # app.include_router(user_router, prefix="/api/v1")
+    app.include_router(chat_router)   
 
 
     return app
