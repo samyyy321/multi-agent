@@ -24,6 +24,9 @@ async def parse_document(
     优先使用异步接口（POST /tasks → 轮询），超大文件不会阻塞。
     """
     base_url = settings.MINERU_API_URL
+    if not base_url:
+        raise RuntimeError("未配置 MINERU_API_URL")
+
     backend = backend or settings.MINERU_BACKEND
     timeout = settings.MINERU_TIMEOUT
 
@@ -50,7 +53,7 @@ async def parse_document(
         task_id = task_data.get("task_id")
 
         if not task_id:
-            logger.warning(f"MinerU 未返回 task_id，尝试同步解析")
+            logger.warning("MinerU 未返回 task_id，尝试同步解析")
             return await _parse_sync(file_path, file_name, backend)
 
         # 轮询等待完成

@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str = "knowledge-docs"
     MINIO_SECURE: bool = False
 
+    # MinerU 文档解析服务
+    MINERU_API_URL: str = ""
+    MINERU_BACKEND: str = "pipeline"
+    MINERU_TIMEOUT: int = 120
+
     # Milvus
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import re
 from loguru import logger
 from langchain_core.messages import SystemMessage
 from langchain_core.language_models import BaseChatModel
@@ -44,11 +45,46 @@ async def _generate_cypher(
     return cypher
 
 
+MAX_GRAPH_RESULTS = 20
+LIMIT_PATTERN = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
+WRITE_CYPHER_PATTERN = re.compile(
+    r"\b(CREATE|MERGE|DELETE|SET|REMOVE|DROP|CALL|LOAD\s+CSV|FOREACH)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_cypher(cypher: str) -> tuple[bool, str]:
+    """仅允许单条只读 Cypher，并把返回结果限制在安全范围内。"""
+    stripped = cypher.strip()
+    if stripped.endswith(";"):
+        stripped = stripped[:-1].rstrip()
+
+    if not stripped or ";" in stripped:
+        return False, "只允许执行单条 Cypher 查询"
+    if "//" in stripped or "/*" in stripped or "*/" in stripped:
+        return False, "Cypher 不允许包含注释"
+    if not re.match(r"^(MATCH|OPTIONAL\s+MATCH)\b", stripped, re.IGNORECASE):
+        return False, "只允许以 MATCH 或 OPTIONAL MATCH 开头的只读查询"
+    if not re.search(r"\bRETURN\b", stripped, re.IGNORECASE):
+        return False, "查询必须包含 RETURN"
+    if WRITE_CYPHER_PATTERN.search(stripped):
+        return False, "查询包含禁止的写操作"
+
+    limits = [int(value) for value in LIMIT_PATTERN.findall(stripped)]
+    if any(limit > MAX_GRAPH_RESULTS for limit in limits):
+        return False, f"LIMIT 不得超过 {MAX_GRAPH_RESULTS}"
+    if not limits:
+        stripped += f" LIMIT {MAX_GRAPH_RESULTS}"
+    return True, stripped
+
+
 async def _execute_cypher(cypher: str, neo4j_driver: AsyncDriver) -> list[dict]:
-    if not cypher:
-        return []
+    valid, validated_cypher = _validate_cypher(cypher)
+    if not valid:
+        raise ValueError(validated_cypher)
+
     async with neo4j_driver.session() as session:
-        result = await session.run(cypher)
+        result = await session.run(validated_cypher)
         return await result.data()
 
 

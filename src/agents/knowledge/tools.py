@@ -49,15 +49,10 @@ def build_knowledge_tools(deps: KnowledgeDeps) -> list:
         doc_type: 可选，文档类型过滤（guideline/drug_instruction/sop/literature）"""
         from src.agents.knowledge.doc_rag import search_docs
         rewritten = await _rewrite(question, deps)
-        with Timer() as t:
-            result = await search_docs(
-                question=rewritten, embedding_model=deps.embedding_model,
-                milvus_client=deps.milvus_client, llm=deps.llm,
-                doc_type=doc_type or None, role=deps.role,
-            )
-        QueryAuditLog.log(
-            deps.user_id, deps.role, question, "doc_rag",
-            ["doc_rag"], result[:80], t.elapsed_ms,
+        result = await search_docs(
+            question=rewritten, embedding_model=deps.embedding_model,
+            milvus_client=deps.milvus_client, llm=deps.llm,
+            doc_type=doc_type or None, role=deps.role,
         )
         return result
 
@@ -68,14 +63,9 @@ def build_knowledge_tools(deps: KnowledgeDeps) -> list:
         question: 用户的问题"""
         from src.agents.knowledge.graph_rag import search_graph
         rewritten = await _rewrite(question, deps)
-        with Timer() as t:
-            result = await search_graph(
-                question=rewritten, neo4j_driver=deps.neo4j_driver,
-                llm=deps.llm, role=deps.role,
-            )
-        QueryAuditLog.log(
-            deps.user_id, deps.role, question, "graph_rag",
-            ["graph_rag"], result[:80], t.elapsed_ms,
+        result = await search_graph(
+            question=rewritten, neo4j_driver=deps.neo4j_driver,
+            llm=deps.llm, role=deps.role,
         )
         return result
 
@@ -87,12 +77,7 @@ def build_knowledge_tools(deps: KnowledgeDeps) -> list:
         if deps.db_session is None:
             return "数据库连接不可用，无法执行查询。"
         from src.agents.knowledge.nl2sql import search_sql
-        with Timer() as t:
-            result = await search_sql(question=question, llm=deps.llm, db=deps.db_session)
-        QueryAuditLog.log(
-            deps.user_id, deps.role, question, "nl2sql",
-            ["nl2sql"], result[:80], t.elapsed_ms,
-        )
+        result = await search_sql(question=question, llm=deps.llm, db=deps.db_session)
         return result
 
     @tool
@@ -103,18 +88,20 @@ def build_knowledge_tools(deps: KnowledgeDeps) -> list:
         question: 用户的问题"""
         from src.agents.knowledge.fusion import multi_channel_search
         rewritten = await _rewrite(question, deps)
-        with Timer() as t:
-            result = await multi_channel_search(
-                question=rewritten, llm=deps.llm,
-                embedding_model=deps.embedding_model,
-                milvus_client=deps.milvus_client,
-                neo4j_driver=deps.neo4j_driver,
-                db_session=deps.db_session,
-                role=deps.role,
-            )
-        QueryAuditLog.log(
-            deps.user_id, deps.role, question, "multi",
-            ["doc_rag", "graph_rag"], result[:80], t.elapsed_ms,
+        result = await multi_channel_search(
+            question=rewritten, llm=deps.llm,
+            embedding_model=deps.embedding_model,
+            milvus_client=deps.milvus_client,
+            neo4j_driver=deps.neo4j_driver,
+            db_session=deps.db_session,
+            role=deps.role,
         )
         return result
 
+
+    return [
+        search_knowledge_docs,
+        search_knowledge_graph,
+        search_knowledge_sql,
+        search_knowledge_multi,
+    ]

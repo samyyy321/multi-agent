@@ -86,8 +86,11 @@ def _split_markdown(md_text: str, chunk_size: int = CHUNK_SIZE, overlap: int = C
             if current:
                 chunks.append(current)
             if len(para) > chunk_size:
-                for i in range(0, len(para), chunk_size - overlap):
+                step = chunk_size - overlap
+                for i in range(0, len(para), step):
                     chunks.append(para[i:i + chunk_size])
+                    if i + chunk_size >= len(para):
+                        break
             else:
                 current = para
                 continue
@@ -116,12 +119,6 @@ async def ingest_file(
     ensure_knowledge_collection(milvus_client)
     doc_id = hashlib.md5(doc_name.encode()).hexdigest()[:16]
 
-    milvus_client.delete(
-        collection_name=COLLECTION_NAME,
-        filter=f'doc_id == "{doc_id}"',
-    )
-
-    # 优先 MinerU，失败回退 LlamaIndex
     md_text = await _parse_with_mineru(file_path, doc_name)
 
     if md_text:
@@ -168,6 +165,11 @@ async def ingest_file(
                 "embedding": emb,
             })
 
+    # 仅在新文档已完成解析和向量化后，才替换旧版本，避免失败时丢失已有知识。
+    milvus_client.delete(
+        collection_name=COLLECTION_NAME,
+        filter=f'doc_id == "{doc_id}"',
+    )
     milvus_client.insert(collection_name=COLLECTION_NAME, data=all_data)
     logger.info(f"文档 '{doc_name}' 导入完成，共 {len(all_data)} 个分块")
     return len(all_data)
