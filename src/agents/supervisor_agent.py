@@ -84,7 +84,7 @@ async def create_supervisor_agent():
         save_memory,  # 写长期记忆
         search_memory,  # 读长期记忆
         # ... 其他工具
-    ]
+    ] + WORKER_TOOLS
     # 3. 创建 Agent
     llm = ChatDeepSeek(model="deepseek-chat")
 

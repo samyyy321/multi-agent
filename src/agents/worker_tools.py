@@ -1,10 +1,8 @@
 # src/agents/worker_tools.py
 
 from langchain_core.tools import tool
-from src.agents.workers.report_agent import get_report_agent
-from src.agents.workers.drug_agent import get_drug_agent
 from src.agents.workers.knowledge_agent import get_knowledge_agent
-from src.agents.workers.operation_agent import get_operation_agent
+
 
 
 from dataclasses import dataclass

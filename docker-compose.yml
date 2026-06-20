@@ -152,6 +152,9 @@ services:
   neo4j:
     image: neo4j:5.20
     container_name: multi-agent-neo4j
+    hostname: neo4j
+    extra_hosts:
+      - "neo4j:127.0.0.1"
     restart: always
     environment:
       NEO4J_AUTH: neo4j/medical123

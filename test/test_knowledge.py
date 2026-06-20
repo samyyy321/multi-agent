@@ -138,7 +138,8 @@ def test_split_markdown_keeps_overlap_when_a_long_paragraph_is_split():
     assert chunks == ["abcdef", "efghij"]
 
 
-def test_settings_disables_mineru_without_api_url():
+def test_settings_disables_mineru_without_api_url(monkeypatch):
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
     settings = Settings(_env_file=None)
 
     assert settings.MINERU_API_URL == ""

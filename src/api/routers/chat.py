@@ -11,7 +11,8 @@ from loguru import logger
 
 from src.infra.database import get_db
 from src.infra.redis_cache import get_checkpointer_redis
-from src.agents.supervisor_agent import get_supervisor_agent, UserContext
+from src.agents.supervisor_agent import get_supervisor_agent
+from src.agents.worker_tools import UserContext
 from src.agents.inquiry.graph import run_inquiry, build_inquiry_deps
 from src.agents.inquiry.state import InquiryState, InquiryPhase
 from src.agents.workers.inquiry_agent import handle_handoff
