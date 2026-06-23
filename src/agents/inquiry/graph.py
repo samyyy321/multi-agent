@@ -59,7 +59,7 @@ async def node_load_context(state: InquiryState, deps: InquiryDeps) -> dict:
                 state.patient_context.patient_id, state.session_id)
 
     from src.agents.inquiry.db_queries import load_patient_context
-    # user_id 即 patients.id，前端传来的是字符串，转 int 后查患者档案
+    # 患者档案 ID 从状态中读取，转为 int 后查询患者档案
     patient_id = int(state.patient_context.patient_id) if state.patient_context.patient_id else None
     # 从HIS查询患者信息和就诊记录
     patient_ctx = await load_patient_context(
@@ -393,7 +393,7 @@ async def node_save_record(state: InquiryState, deps: InquiryDeps) -> dict:
     from src.agents.inquiry.db_queries import save_consultation_record
     payload = state.handoff_payload
     chief_complaint = "、".join(state.confirmed_symptoms[:5])
-    # user_id 即 patients.id，转 int 后写入外键
+    # 患者档案 ID 从移交数据中读取，转为 int 后写入外键
     patient_id = int(payload.patient_id) if payload.patient_id else None
 
     logger.info("节点⑨保存问诊记录 保存问诊记录 | patient_id={} diagnosis={} department={}",
@@ -540,6 +540,7 @@ async def run_inquiry(
     deps: InquiryDeps,
     existing_state: InquiryState | None = None,
     user_id: str | None = None,
+    patient_id: int | None = None,
     long_term_memories: list[str] | None = None,
 ) -> tuple[str, InquiryState]:
     """
@@ -550,7 +551,8 @@ async def run_inquiry(
         thread_id        : thread_id（用于关联 Redis 和 PostgreSQL 记录）
         deps              : 依赖注入容器
         existing_state    : 上一轮的状态（多轮对话时传入）
-        user_id           : 来自 UserContext 的用户 ID，贯穿整个问诊流程
+        user_id           : 来自 UserContext 的用户 ID，用于标识当前账户
+        patient_id        : 患者档案 ID，用于加载病史并保存问诊记录
         long_term_memories: Supervisor 从 Milvus 检索到的长期记忆摘要
 
     Returns:
@@ -563,7 +565,7 @@ async def run_inquiry(
         state = InquiryState(
             session_id=thread_id,
             patient_context=PatientContext(
-                patient_id=user_id,
+                patient_id=patient_id,
                 long_term_memories=long_term_memories or [],
             ),
         )

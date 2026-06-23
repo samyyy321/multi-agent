@@ -24,6 +24,7 @@ settings = get_settings()
 class UserContext:  # 用户上下文
     user_id: str
     session_id: str
+    patient_id: int | None = None
 
 # 仅第一轮会发起调用
 @tool
@@ -39,6 +40,7 @@ async def call_inquiry_agent(message: str, runtime: ToolRuntime[UserContext]) ->
     # 获取当前会话 ID 和用户 ID
     session_id = runtime.context.session_id
     user_id = runtime.context.user_id
+    patient_id = runtime.context.patient_id
     print("🔧工具调用 call_inquiry_agent :", session_id, message)
 
     deps = build_inquiry_deps()
@@ -50,6 +52,7 @@ async def call_inquiry_agent(message: str, runtime: ToolRuntime[UserContext]) ->
         deps=deps,
         existing_state=None,  # 首轮，无历史状态
         user_id=user_id,
+        patient_id=patient_id,
     )
 
     # 首轮即收敛（精确症状/急症等）：触发挂号移交，不设活跃标记

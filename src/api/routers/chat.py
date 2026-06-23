@@ -58,7 +58,7 @@ async def _run_inquiry_turn(
     deps = build_inquiry_deps(db_session=db)
     reply, new_state = await run_inquiry(
         user_message=message,
-        session_id=thread_id,
+        thread_id=thread_id,
         deps=deps,
         existing_state=existing_state,
     )
@@ -105,7 +105,11 @@ async def chat(
         result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": req.message}]},
             config=config,
-            context=UserContext(user_id=req.user_id, session_id=req.session_id),
+            context=UserContext(
+                user_id=req.user_id,
+                session_id=req.session_id,
+                patient_id=req.patient_id,
+            ),
         )
         reply = result["messages"][-1].content
         return ChatResponse(reply=reply, session_id=req.session_id)
@@ -152,6 +156,11 @@ async def chat_stream(
                 async for chunk in agent.astream(
                     {"messages": [{"role": "user", "content": req.message}]},
                     config=config,
+                    context=UserContext(
+                        user_id=req.user_id,
+                        session_id=req.session_id,
+                        patient_id=req.patient_id,
+                    ),
                     stream_mode="messages",
                 ):
                     if isinstance(chunk, tuple):

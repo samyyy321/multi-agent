@@ -9,7 +9,7 @@ from src.infra.milvus_client import get_milvus_client_alias
 from src.infra.milvus_store import MilvusStore
 from src.infra.redis_cache import get_checkpointer_redis
 from dotenv import load_dotenv
-from src.agents.worker_tools import WORKER_TOOLS
+from src.agents.worker_tools import UserContext, WORKER_TOOLS
 
 load_dotenv()
 settings = get_settings()
@@ -107,6 +107,7 @@ async def create_supervisor_agent():
                 keep=("messages", 6),  # 摘要后保留最近 4 条消息
             )
         ],
+        context_schema=UserContext,
         checkpointer=checkpointer, # 短期记忆
         store=store,  # 长期记忆
     )
@@ -126,7 +127,12 @@ async def get_supervisor_agent():
 
 
 # FastAPI 路由中使用
-async def chat_endpoint(user_id: str, session_id: str, message: str):
+async def chat_endpoint(
+    user_id: str,
+    session_id: str,
+    message: str,
+    patient_id: int | None = None,
+):
     agent = await get_supervisor_agent()  # 使用单例，不重复初始化
 
     config = {"configurable": {"thread_id": f"{user_id}:{session_id}"}}
@@ -134,5 +140,10 @@ async def chat_endpoint(user_id: str, session_id: str, message: str):
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": message}]},
         config=config,
+        context=UserContext(
+            user_id=user_id,
+            session_id=session_id,
+            patient_id=patient_id,
+        ),
     )
     return result["messages"][-1].content
