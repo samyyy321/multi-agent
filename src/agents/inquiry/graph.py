@@ -33,8 +33,9 @@ settings = get_settings()
 
 # ── 依赖注入容器（在 graph 编译时注入，避免全局单例） ──────────────────────
 class InquiryDeps:
-    def __init__(self, llm, neo4j_driver, embedding_model, milvus_client, db_session):
+    def __init__(self, llm, symptom_llm, neo4j_driver, embedding_model, milvus_client, db_session):
         self.llm = llm
+        self.symptom_llm = symptom_llm
         self.neo4j_driver = neo4j_driver
         self.embedding_model = embedding_model
         self.milvus_client = milvus_client
@@ -146,7 +147,7 @@ async def node_extract_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
     # 等待标准化三层管线执行
     result = await normalize_symptoms(
         user_input=last_user_msg,
-        llm=deps.llm,
+        llm=deps.symptom_llm,
         neo4j_driver=deps.neo4j_driver,
         embedding_model=deps.embedding_model,
         milvus_client=deps.milvus_client,
@@ -605,6 +606,13 @@ def build_inquiry_deps(db_session=None) -> InquiryDeps:
         api_key=settings.DEEPSEEK_API_KEY,
         temperature=0.3,
     )
+    # 结构化症状提取需要 Function Calling，单独关闭 Thinking 以避免 tool_choice 冲突。
+    symptom_llm = ChatDeepSeek(
+        model=settings.CHAT_MODEL,
+        api_key=settings.DEEPSEEK_API_KEY,
+        temperature=0.3,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
     embedding_model = DashScopeEmbeddings(
         model=settings.EMBEDDING_MODEL,
         dashscope_api_key=settings.DASHSCOPE_API_KEY,
@@ -616,6 +624,7 @@ def build_inquiry_deps(db_session=None) -> InquiryDeps:
     )
     return InquiryDeps(
         llm=llm,
+        symptom_llm=symptom_llm,
         neo4j_driver=neo4j_driver,
         embedding_model=embedding_model,
         milvus_client=milvus_client,

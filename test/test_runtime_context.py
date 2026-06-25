@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import ToolRuntime
 
 
@@ -8,7 +9,7 @@ import src.agents.inquiry.graph as inquiry_graph
 import src.agents.supervisor_agent as supervisor_agent
 import src.agents.worker_tools as worker_tools
 import src.api.routers.chat as chat_router
-from src.agents.inquiry.state import InquiryPhase
+from src.agents.inquiry.state import InquiryPhase, InquiryState
 from src.agents.worker_tools import UserContext
 
 
@@ -226,3 +227,48 @@ async def test_active_inquiry_turn_passes_thread_id_to_inquiry_flow(monkeypatch)
 
     assert reply == "answer"
     assert captured["thread_id"] == "user-1:session-1"
+
+
+def test_inquiry_deps_creates_non_thinking_symptom_model(monkeypatch):
+    model_calls = []
+
+    class _FakeChatModel:
+        def __init__(self, **kwargs):
+            model_calls.append(kwargs)
+
+    monkeypatch.setattr(inquiry_graph, "ChatDeepSeek", _FakeChatModel)
+    monkeypatch.setattr(inquiry_graph, "DashScopeEmbeddings", lambda **kwargs: object())
+    monkeypatch.setattr(inquiry_graph, "get_neo4j_driver", lambda: object())
+    monkeypatch.setattr(inquiry_graph, "get_milvus_client_alias", lambda: "test")
+    monkeypatch.setattr(inquiry_graph, "MilvusClient", lambda **kwargs: object())
+
+    deps = inquiry_graph.build_inquiry_deps()
+
+    assert deps.llm is not deps.symptom_llm
+    assert model_calls[1]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_symptom_node_uses_non_thinking_symptom_model(monkeypatch):
+    captured = {}
+    primary_llm = object()
+    symptom_llm = object()
+
+    async def fake_normalize_symptoms(**kwargs):
+        captured.update(kwargs)
+        return {"all_standard": ["fever"], "unmatched": []}
+
+    monkeypatch.setattr(inquiry_graph, "normalize_symptoms", fake_normalize_symptoms)
+    deps = SimpleNamespace(
+        llm=primary_llm,
+        symptom_llm=symptom_llm,
+        neo4j_driver=object(),
+        embedding_model=object(),
+        milvus_client=object(),
+    )
+    state = InquiryState(messages=[HumanMessage(content="fever")])
+
+    result = await inquiry_graph.node_extract_symptoms(state, deps)
+
+    assert result["confirmed_symptoms"] == ["fever"]
+    assert captured["llm"] is symptom_llm

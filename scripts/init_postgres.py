@@ -20,6 +20,46 @@ logger = logging.getLogger(__name__)
 
 # medical.json 路径：项目根目录 data/raw/medical.json
 MEDICAL_JSON_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "medical.json"
+TEST_PATIENT_ID = 42
+
+
+def seed_test_patient(cur) -> int:
+    """创建或更新开发联调用的固定测试患者，并校正主键序列。"""
+    cur.execute(
+        """
+        INSERT INTO patients (
+            id, name, gender, age, allergy_history, medical_history, blood_type
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE
+        SET
+            name = EXCLUDED.name,
+            gender = EXCLUDED.gender,
+            age = EXCLUDED.age,
+            allergy_history = EXCLUDED.allergy_history,
+            medical_history = EXCLUDED.medical_history,
+            blood_type = EXCLUDED.blood_type,
+            updated_at = NOW()
+        """,
+        (
+            TEST_PATIENT_ID,
+            "测试患者42",
+            "男",
+            30,
+            "青霉素",
+            "无",
+            "O",
+        ),
+    )
+    cur.execute(
+        """
+        SELECT setval(
+            pg_get_serial_sequence('patients', 'id'),
+            GREATEST((SELECT COALESCE(MAX(id), 1) FROM patients), 1)
+        )
+        """
+    )
+    return TEST_PATIENT_ID
 
 def load_medical_data(filepath: Path) -> list[dict]:
     """
@@ -57,6 +97,11 @@ def import_data():
     )
     conn.autocommit = False
     cur = conn.cursor()
+
+    # ????????????????? patient_id=42 ???
+    seed_test_patient(cur)
+    conn.commit()
+    logger.info("测试患者初始化完成: patient_id=%s", TEST_PATIENT_ID)
 
     records = load_medical_data(MEDICAL_JSON_PATH)
 
