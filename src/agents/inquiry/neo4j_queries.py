@@ -11,51 +11,68 @@ async def query_candidate_diseases(
     neo4j_driver: AsyncDriver,
     top_k: int = 10,
 ) -> list[CandidateDisease]:
-    """
-    根据已确认症状列表，从 Neo4j 查询候选疾病。
-    按基础置信度（命中症状数 / 该疾病总症状数）降序排列，取 Top K。
-    """
+    """根据已确认症状查询候选疾病。
+
+    基础置信度以已确认症状覆盖率计算；存在多症状命中时，优先保留多症状候选。"""
     if not confirmed_symptoms:
         return []
 
+    confirmed_count = len(set(confirmed_symptoms))
     cypher = """
     MATCH (d:Disease)-[:HAS_SYMPTOM]->(s:Symptom)
     WHERE s.name IN $confirmed_symptoms
-    WITH d, collect(s.name) AS matched_symptoms, count(s) AS matched_count
+    WITH d, collect(DISTINCT s.name) AS matched_symptoms, count(DISTINCT s) AS matched_count
     MATCH (d)-[:HAS_SYMPTOM]->(all_s:Symptom)
-    WITH d, matched_symptoms, matched_count, count(all_s) AS total_symptoms
-    ORDER BY toFloat(matched_count) / total_symptoms DESC
+    WITH d, matched_symptoms, matched_count, count(DISTINCT all_s) AS total_symptoms
+    WITH d, matched_symptoms, matched_count, total_symptoms,
+         toFloat(matched_count) / $confirmed_count AS user_coverage,
+         toFloat(matched_count) / total_symptoms AS disease_coverage
+    ORDER BY
+        matched_count DESC,
+        user_coverage DESC,
+        CASE WHEN matched_count > 1 THEN disease_coverage ELSE 0 END DESC,
+        total_symptoms DESC,
+        d.name ASC
     LIMIT $top_k
     RETURN
         d.name AS disease,
         matched_symptoms,
         matched_count,
         total_symptoms,
-        toFloat(matched_count) / total_symptoms AS base_confidence
+        user_coverage AS base_confidence
     """
 
     async with neo4j_driver.session() as session:
         result = await session.run(
             cypher,
             confirmed_symptoms=confirmed_symptoms,
+            confirmed_count=confirmed_count,
             top_k=top_k,
         )
         records = await result.data()
 
-    candidates = []
-    for r in records:
-        candidates.append(CandidateDisease(
-            name=r["disease"],
-            base_confidence=round(r["base_confidence"], 4),
-            confidence=round(r["base_confidence"], 4),  # 初始值，后续加权调整
-            matched_symptoms=r["matched_symptoms"],
-            all_symptoms=[],   # 由 enrich_candidate_details 补充
+    candidates = [
+        CandidateDisease(
+            name=record["disease"],
+            base_confidence=round(record["base_confidence"], 4),
+            confidence=round(record["base_confidence"], 4),
+            matched_symptoms=record["matched_symptoms"],
+            all_symptoms=[],
             department="",
             checks=[],
             complications=[],
-        ))
+        )
+        for record in records
+    ]
 
-    logger.debug(f"Neo4j 候选疾病: {[c.name for c in candidates]}")
+    if any(len(candidate.matched_symptoms) > 1 for candidate in candidates):
+        candidates = [
+            candidate
+            for candidate in candidates
+            if len(candidate.matched_symptoms) > 1
+        ]
+
+    logger.debug(f"Neo4j candidates: {[candidate.name for candidate in candidates]}")
     return candidates
 
 

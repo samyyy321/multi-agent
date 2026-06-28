@@ -79,7 +79,11 @@ def check_convergence(
     if not candidates:
         return False, False
 
-    top1 = candidates[0].confidence
+    top_candidate = candidates[0]
+    if len(top_candidate.matched_symptoms) < 2:
+        return False, False
+
+    top1 = top_candidate.confidence
 
     # 条件1：Top1 置信度 ≥ 70%
     if top1 >= 0.70:

@@ -55,22 +55,79 @@ PARSE_ANSWER_PROMPT = """你是医疗信息提取专家。
 
 
 # ── 4. 生成诊断结论文案 用于生成诊断结论的节点──────────────────────────────────────────────────────────
-CONCLUSION_PROMPT = """你是智能问诊助手，请根据以下问诊结果，生成一段清晰、友好的诊断结论。
+CONCLUSION_REVIEW_PROMPT = """你是临床问诊结论审核助手。请检查知识图谱候选疾病是否能合理解释当前症状。
 
-问诊结果：
-- 已确认症状：{confirmed_symptoms}
-- 主要诊断：{primary_disease}（置信度：{confidence:.0%}）
-- 疑似疾病：{suspected_diseases}
-- 建议就诊科室：{department}
-- 建议检查项目：{checks}
-- 是否信息不足（达到轮次上限）：{force_conclude}
+已确认症状：
+{confirmed_symptoms}
+已否认症状：
+{denied_symptoms}
+图谱候选疾病：
+{candidates}
+
+规则：
+1. decision 只能是 accept 或 provisional。
+2. accept 仅在首位图谱候选能合理解释症状时使用； disease 必须为首位候选疾病。
+3. provisional 用于首位候选明显不合理或没有候选时； disease 必须是与症状相符的宽泛临床方向或疾病倾向，不能表述为已确诊。
+4. 必须给出 decision 和 disease，不得输出 insufficient。
+5. 不得输出百分比、置信度或确诊授权性表述。
+6. 仅输出 JSON，不要解释。
+
+{{
+  "decision": "accept or provisional",
+  "disease": "疾病或临床方向",
+  "department": "建议科室",
+  "reason": "简短审核理由"
+}}
+
+仅输出 JSON，不要解释。"""
+
+
+SPECIFIC_PROVISIONAL_DISEASE_PROMPT = """你是临床问诊结论审核助手。上一次输出了泛化方向，请改为一个具体的待排病症。
+
+已确认症状：
+{confirmed_symptoms}
+已否认症状：
+{denied_symptoms}
+图谱候选疾病：
+{candidates}
+上一次不合格的方向：
+{previous_disease}
 
 要求：
-1. 先简要总结患者的症状
-2. 说明最可能的诊断及原因
-3. 如果有疑似疾病，简要提及
-4. 给出就诊建议（科室 + 检查）
-5. 如果 force_conclude=True，加上"由于信息有限，以上仅供参考，建议就诊后由医生进一步确认"
+1. disease 必须是一个具体病症名称，例如“急性上呼吸道感染”。
+2. disease 不得使用“待查”、“方向”、“倾向”、“未明确病因”、“症状性疾病”等泛化表述。
+3. 输出的病症仅作为待排结论，不得表述为已确诊。
+4. decision 必须为 provisional。
+5. 不得输出置信度、百分比或概率。
+6. 仅输出 JSON，不要解释。
+
+{{
+  "decision": "provisional",
+  "disease": "具体待排病症",
+  "department": "建议科室",
+  "reason": "简短依据"
+}}
+
+仅输出 JSON，不要解释。"""
+
+CONCLUSION_PROMPT = """你是智能问诊助手，请根据以下问诊审核结果，生成清晰、友好的结论。
+
+问诊结果：
+- 已确认症状：: {confirmed_symptoms}
+- 当前评估方向: {primary_disease}
+- 结论类型: {assessment_type}
+- 审核依据: {assessment_reason}
+- 需鉴别的方向: {suspected_diseases}
+- 建议就诊科室: {department}
+- 建议检查项目: {checks}
+- 是否已达到问诊轮次上限: {force_conclude}
+
+要求：
+1. 先简要总结症状。
+2. 必须明确给出当前评估方向及其依据。
+3. 如果结论类型为临床方向（待排），必须使用“倾向”、“待排”等表述，不得写成已确诊。
+4. 给出就诊科室和建议检查。
+5. 不得输出任何置信度、百分比或概率数值。
 6. 最后询问：是否现在预约挂号？
 
 语气温和专业，避免引起患者恐慌。直接输出结论内容。"""

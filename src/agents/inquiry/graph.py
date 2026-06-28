@@ -26,7 +26,7 @@ from src.agents.inquiry.neo4j_queries import (
 from src.agents.inquiry.confidence import apply_context_weights, check_convergence
 from src.agents.inquiry.prompts import (
     CLARIFY_PROMPT, ASK_SYMPTOMS_PROMPT, PARSE_ANSWER_PROMPT,
-    CONCLUSION_PROMPT, EMERGENCY_CHECK_PROMPT
+    CONCLUSION_PROMPT, CONCLUSION_REVIEW_PROMPT, SPECIFIC_PROVISIONAL_DISEASE_PROMPT, EMERGENCY_CHECK_PROMPT
 )
 
 settings = get_settings()
@@ -325,52 +325,132 @@ async def node_parse_answer(state: InquiryState, deps: InquiryDeps) -> dict:
     }
     
     
-async def node_conclude(state: InquiryState, deps: InquiryDeps) -> dict:
-    """
-    节点⑧：生成诊断结论。
-    整合所有信息，生成用户可读的结论文案，并构建 HandoffPayload。
-    """
-    candidates = state.candidate_diseases
-    if not candidates:
-        logger.warning("节点⑧生成诊断结论 无候选疾病，返回无结果提示")
-        no_result_msg = (
-            "根据您描述的症状，我暂时无法在知识库中找到匹配的疾病。\n\n"
-            "这可能是因为症状较为罕见，或者需要更多信息。\n"
-            "建议您直接前往医院就诊，由医生进行面诊。"
-        )
-        return {
-            "phase": InquiryPhase.END,
-            "messages": [AIMessage(content=no_result_msg)],
-        }
+def _parse_json_content(content: str) -> dict[str, Any]:
+    """解析 LLM 返回的 JSON 对象。"""
+    normalized = content.strip()
+    if "```" in normalized:
+        normalized = normalized.split("```")[1].lstrip("json").strip()
+    parsed = json.loads(normalized)
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM JSON 不是对象")
+    return parsed
 
-    top1 = candidates[0]
-    suspected = [c.name for c in candidates[1:5]]
-    logger.info("节点⑧生成诊断结论 生成诊断结论 | 主诊断={} 置信度={:.3f} 科室={} 疑似={}",
-                top1.name, top1.confidence, top1.department, suspected)
+
+GENERIC_PROVISIONAL_MARKERS = (
+    "待查",
+    "方向",
+    "倾向",
+    "未明确病因",
+    "症状性疾病",
+    "不明原因",
+)
+
+
+def _is_generic_provisional_disease(disease: str) -> bool:
+    """判断 LLM 返回的 provisional 是否仍为泛化方向。"""
+    return any(marker in disease for marker in GENERIC_PROVISIONAL_MARKERS)
+
+
+async def _review_conclusion_candidate(state: InquiryState, deps: InquiryDeps) -> dict[str, Any]:
+    """使用 LLM 审查图谱候选，并在 provisional 时产出具体待排病症。"""
+    candidates = state.candidate_diseases
+    top_candidate = candidates[0] if candidates else None
+    fallback = {
+        "decision": "accept" if top_candidate else "provisional",
+        "primary_disease": top_candidate.name if top_candidate else "未明确病因的症状性疾病（待排）",
+        "department": top_candidate.department if top_candidate and top_candidate.department else "综合内科",
+        "reason": "当前图谱候选与症状的匹配信息有限",
+        "suspected_diseases": [candidate.name for candidate in candidates[1:5]],
+        "recommended_checks": top_candidate.checks[:5] if top_candidate else [],
+        "primary_confidence": top_candidate.confidence if top_candidate else 0.0,
+    }
+
+    candidate_data = [
+        {
+            "disease": candidate.name,
+            "matched_symptoms": candidate.matched_symptoms,
+            "department": candidate.department,
+            "checks": candidate.checks[:5],
+        }
+        for candidate in candidates[:5]
+    ]
+    review_context = {
+        "confirmed_symptoms": "、".join(state.confirmed_symptoms) or "暂无",
+        "denied_symptoms": "、".join(state.denied_symptoms) or "暂无",
+        "candidates": json.dumps(candidate_data, ensure_ascii=False),
+    }
+    prompt = CONCLUSION_REVIEW_PROMPT.format(**review_context)
+
+    try:
+        response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+        review = _parse_json_content(response.content)
+        if review.get("decision") != "provisional":
+            return fallback
+
+        disease = str(review.get("disease", "")).strip()
+        if _is_generic_provisional_disease(disease):
+            repair_prompt = SPECIFIC_PROVISIONAL_DISEASE_PROMPT.format(
+                **review_context,
+                previous_disease=disease or "暂无",
+            )
+            repair_response = await deps.llm.ainvoke([SystemMessage(content=repair_prompt)])
+            review = _parse_json_content(repair_response.content)
+            disease = str(review.get("disease", "")).strip()
+
+        if review.get("decision") != "provisional" or not disease or _is_generic_provisional_disease(disease):
+            return fallback
+        if "待排" not in disease:
+            disease = f"{disease}（待排）"
+
+        return {
+            "decision": "provisional",
+            "primary_disease": disease,
+            "department": str(review.get("department", "")).strip() or fallback["department"],
+            "reason": str(review.get("reason", "")).strip() or fallback["reason"],
+            "suspected_diseases": [],
+            "recommended_checks": [],
+            "primary_confidence": 0.0,
+        }
+    except Exception as error:
+        logger.warning(f"结论审查失败，回退到图谱候选: {error}")
+        return fallback
+
+
+async def node_conclude(state: InquiryState, deps: InquiryDeps) -> dict:
+    """节点⑧：审查图谱候选并生成用户可读的问诊结论。"""
+    review = await _review_conclusion_candidate(state, deps)
+    assessment_type = "图谱候选方向" if review["decision"] == "accept" else "临床方向（待排）"
+    suspected = review["suspected_diseases"]
+    logger.info(
+        "节点⑧生成问诊结论 | 评估方向={} 类型={} 科室={}",
+        review["primary_disease"],
+        assessment_type,
+        review["department"],
+    )
 
     prompt = CONCLUSION_PROMPT.format(
         confirmed_symptoms="、".join(state.confirmed_symptoms) or "暂无",
-        primary_disease=top1.name,
-        confidence=top1.confidence,
-        suspected_diseases="、".join(suspected) if suspected else "无",
-        department=top1.department or "综合内科",
-        checks="、".join(top1.checks[:5]) if top1.checks else "暂无",
+        primary_disease=review["primary_disease"],
+        assessment_type=assessment_type,
+        assessment_reason=review["reason"],
+        suspected_diseases="、".join(suspected) if suspected else "暂无",
+        department=review["department"],
+        checks="、".join(review["recommended_checks"]) or "暂无",
         force_conclude=state.force_conclude,
     )
     response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
 
-    # 构建移交数据包（挂号数据包）
     handoff = InquiryHandoffPayload(
         patient_id=state.patient_context.patient_id,
         patient_context=state.patient_context.model_dump(),
         confirmed_symptoms=state.confirmed_symptoms,
         denied_symptoms=state.denied_symptoms,
         unmatched_symptoms=state.unmatched_symptoms,
-        primary_disease=top1.name,
-        primary_confidence=top1.confidence,
+        primary_disease=review["primary_disease"],
+        primary_confidence=review["primary_confidence"],
         suspected_diseases=suspected,
-        department=top1.department or "综合内科",
-        recommended_checks=top1.checks[:5],
+        department=review["department"],
+        recommended_checks=review["recommended_checks"],
         total_rounds=state.round,
         session_id=state.session_id,
     )
