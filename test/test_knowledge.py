@@ -186,3 +186,59 @@ async def test_ingest_file_preserves_existing_document_when_embedding_fails(monk
         )
 
     assert client.deleted == []
+
+
+@pytest.mark.parametrize("injected", [False, True])
+async def test_sql_tool_uses_scoped_session_or_reuses_injected_session(monkeypatch, injected):
+    from contextlib import asynccontextmanager
+    import src.infra.database as database_module
+
+    database = _FakeDatabase([{"total": 3}])
+    closed = []
+
+    @asynccontextmanager
+    async def session_factory():
+        try:
+            yield database
+        finally:
+            closed.append(database)
+
+    monkeypatch.setattr(database_module, "AsyncSessionLocal", session_factory)
+    deps = _deps()
+    deps.llm = _FakeLlm(["SELECT total FROM visits", "answer"])
+    deps.db_session = database if injected else None
+    sql_tool = next(tool for tool in build_knowledge_tools(deps) if tool.name == "search_knowledge_sql")
+
+    answer = await sql_tool.ainvoke({"question": "record count"})
+
+    assert answer == "answer"
+    assert database.statements == ["SELECT total FROM visits LIMIT 100"]
+    assert closed == ([] if injected else [database])
+    assert deps.db_session is (database if injected else None)
+
+
+async def test_sql_tool_closes_owned_session_when_query_raises(monkeypatch):
+    from contextlib import asynccontextmanager
+    import src.infra.database as database_module
+    import src.agents.knowledge.nl2sql as nl2sql
+
+    closed = []
+
+    @asynccontextmanager
+    async def session_factory():
+        try:
+            yield object()
+        finally:
+            closed.append(True)
+
+    async def failing_search(**kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(database_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(nl2sql, "search_sql", failing_search)
+    sql_tool = next(tool for tool in build_knowledge_tools(_deps()) if tool.name == "search_knowledge_sql")
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await sql_tool.ainvoke({"question": "record count"})
+
+    assert closed == [True]

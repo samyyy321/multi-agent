@@ -16,7 +16,7 @@ class _SequencedLlm:
         self.responses = iter(responses)
         self.prompts = []
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, config=None):
         self.prompts.append(messages[0].content)
         return _FakeResponse(next(self.responses))
 

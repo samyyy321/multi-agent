@@ -74,11 +74,15 @@ def build_knowledge_tools(deps: KnowledgeDeps) -> list:
         """从运营数据库中查询统计数据并生成回答。
         适用：查询问诊量、药品库存、科室排名、收入统计等结构化数据。
         question: 用户的问题"""
-        if deps.db_session is None:
-            return "数据库连接不可用，无法执行查询。"
         from src.agents.knowledge.nl2sql import search_sql
-        result = await search_sql(question=question, llm=deps.llm, db=deps.db_session)
-        return result
+        from src.infra.database import AsyncSessionLocal
+
+        if deps.db_session is not None:
+            return await search_sql(question=question, llm=deps.llm, db=deps.db_session)
+
+        # 单例 Agent 不持有数据库会话；每次 SQL 调用独立创建，用完即关闭。
+        async with AsyncSessionLocal() as db:
+            return await search_sql(question=question, llm=deps.llm, db=db)
 
     @tool
     async def search_knowledge_multi(question: str) -> str:

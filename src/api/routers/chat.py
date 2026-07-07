@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import traceback
+from contextlib import aclosing
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ from src.infra.database import get_db
 from src.infra.redis_cache import get_checkpointer_redis
 from src.agents.supervisor_agent import get_supervisor_agent
 from src.agents.worker_tools import UserContext
-from src.agents.inquiry.graph import run_inquiry, build_inquiry_deps
+from src.agents.inquiry.graph import run_inquiry, stream_inquiry, build_inquiry_deps
 from src.agents.inquiry.state import InquiryState, InquiryPhase
 from src.agents.workers.inquiry_agent import handle_handoff
 
@@ -48,8 +49,7 @@ async def _run_inquiry_turn(
     执行一轮问诊对话（路由层直接调用，绕过 Supervisor）。
     从 Redis 恢复状态 → 执行 InquiryGraph → 保存新状态 → 返回回复。
     """
-    active_key = f"inquiry_active:{thread_id}"
-    state_key  = f"inquiry_state:{thread_id}"
+    state_key = f"inquiry_state:{thread_id}"
 
     # 从 Redis 反序列化恢复上一轮状态
     raw = await redis.get(state_key)
@@ -63,18 +63,24 @@ async def _run_inquiry_turn(
         existing_state=existing_state,
     )
 
-    # 问诊结束：清除 Redis 标记，触发挂号移交
+    suffix = await _finish_inquiry_turn(new_state, thread_id, redis)
+    return reply + suffix
+
+
+async def _finish_inquiry_turn(new_state: InquiryState, thread_id: str, redis) -> str:
+    """统一保存或清理问诊状态；流式接口必须在发送 done 之前完成此步骤。"""
+    active_key = f"inquiry_active:{thread_id}"
+    state_key = f"inquiry_state:{thread_id}"
     if new_state.phase in (InquiryPhase.HANDOFF, InquiryPhase.END):
         await redis.delete(active_key, state_key)
         if new_state.phase == InquiryPhase.HANDOFF and new_state.handoff_payload:
             handoff_reply = await handle_handoff(new_state.handoff_payload)
-            return f"{reply}\n\n---\n{handoff_reply}"
-        return reply
+            return f"\n\n---\n{handoff_reply}"
+        return ""
 
-    # 问诊继续：更新 Redis 状态，重置 TTL
-    await redis.set(state_key,  new_state.model_dump_json(), ex=3600)
-    await redis.set(active_key, "1",                         ex=3600)
-    return reply
+    await redis.set(state_key, new_state.model_dump_json(), ex=3600)
+    await redis.set(active_key, "1", ex=3600)
+    return ""
 
 
 # ── 非流式接口 ────────────────────────────────────────────────────────────
@@ -141,13 +147,20 @@ async def chat_stream(
             thread_id = f"{req.user_id}:{req.session_id}"
             active_key = f"inquiry_active:{thread_id}"
 
-            # ── 问诊进行中：InquiryGraph 非流式执行，结果整体推送 ──
-            # （InquiryGraph 内部多次调用 LLM，流式拆分复杂度高，
-            #   此处以整体推送为主，后续可按节点拆分优化）
+            # ── 问诊进行中：只推送用户可见正文，图执行结束后再持久化状态 ──
             if await redis.exists(active_key):
-                reply = await _run_inquiry_turn(req.message, thread_id, redis, db)
-                data = json.dumps({"type": "token", "content": reply}, ensure_ascii=False)
-                yield f"data: {data}\n\n"
+                raw = await redis.get(f"inquiry_state:{thread_id}")
+                state = InquiryState.model_validate_json(raw) if raw else None
+                deps = build_inquiry_deps(db_session=db)
+                async with aclosing(stream_inquiry(
+                    req.message, thread_id, deps, existing_state=state,
+                )) as events:
+                    async for event_type, payload in events:
+                        if event_type == "state":
+                            payload = await _finish_inquiry_turn(payload, thread_id, redis)
+                        if payload:
+                            data = json.dumps({"type": "token", "content": payload}, ensure_ascii=False)
+                            yield f"data: {data}\n\n"
 
             else:
                 # ── 无活跃问诊：Supervisor 流式推送 ──

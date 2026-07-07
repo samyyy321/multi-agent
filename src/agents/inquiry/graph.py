@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 import json
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 from loguru import logger
@@ -30,6 +32,9 @@ from src.agents.inquiry.prompts import (
 )
 
 settings = get_settings()
+
+# 仅带此标签的正文调用允许输出到用户，内部结构化分析不进入 SSE。
+INQUIRY_REPLY_TAG = "inquiry_reply"
 
 # ── 依赖注入容器（在 graph 编译时注入，避免全局单例） ──────────────────────
 class InquiryDeps:
@@ -185,7 +190,9 @@ async def node_clarify(state: InquiryState, deps: InquiryDeps) -> dict:
 
     logger.info("节点④澄清模糊描述 用户描述模糊，发起澄清引导 | round={}", state.round)
     prompt = CLARIFY_PROMPT.format(user_input=last_user_msg)
-    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+    response = await deps.llm.ainvoke(
+        [SystemMessage(content=prompt)], config={"tags": [INQUIRY_REPLY_TAG]}
+    )
     logger.debug("节点④澄清模糊描述 澄清回复已生成，等待用户下一轮输入")
     return {
         "round": state.round + 1,
@@ -266,7 +273,9 @@ async def node_ask_symptoms(state: InquiryState, deps: InquiryDeps) -> dict:
     prompt = ASK_SYMPTOMS_PROMPT.format(
         symptoms_to_ask="\n".join(f"- {s}" for s in human_symptoms)
     )
-    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+    response = await deps.llm.ainvoke(
+        [SystemMessage(content=prompt)], config={"tags": [INQUIRY_REPLY_TAG]}
+    )
 
     return {
         "round": state.round + 1,
@@ -438,7 +447,9 @@ async def node_conclude(state: InquiryState, deps: InquiryDeps) -> dict:
         checks="、".join(review["recommended_checks"]) or "暂无",
         force_conclude=state.force_conclude,
     )
-    response = await deps.llm.ainvoke([SystemMessage(content=prompt)])
+    response = await deps.llm.ainvoke(
+        [SystemMessage(content=prompt)], config={"tags": [INQUIRY_REPLY_TAG]}
+    )
 
     handoff = InquiryHandoffPayload(
         patient_id=state.patient_context.patient_id,
@@ -615,6 +626,60 @@ def build_inquiry_graph(deps: InquiryDeps):
 # 对外接口：供 call_inquiry_agent 工具调用
 # ════════════════════════════════════════════════════════════════════════
 
+def _prepare_inquiry_state(
+    user_message: str,
+    thread_id: str,
+    existing_state: InquiryState | None,
+    patient_id: int | None = None,
+    long_term_memories: list[str] | None = None,
+) -> InquiryState:
+    """统一流式与非流式入口的状态初始化，保留已有患者上下文。"""
+    state = existing_state if existing_state is not None else InquiryState(
+        session_id=thread_id,
+        patient_context=PatientContext(
+            patient_id=patient_id,
+            long_term_memories=long_term_memories or [],
+        ),
+    )
+    state.messages.append(HumanMessage(content=user_message))
+    return state
+
+
+async def stream_inquiry(
+    user_message: str,
+    thread_id: str,
+    deps: InquiryDeps,
+    existing_state: InquiryState | None = None,
+) -> AsyncIterator[tuple[str, str | InquiryState]]:
+    """流式执行一轮问诊：逐块返回正文，完成后返回用于持久化的最终状态。"""
+    state = _prepare_inquiry_state(user_message, thread_id, existing_state)
+    graph = build_inquiry_graph(deps)
+    config = {"configurable": {"thread_id": thread_id}}
+    final_state = state
+    emitted_reply = False
+
+    # 同时订阅模型片段与状态；同一节点也可能调用内部审查模型，不能只按节点过滤。
+    async with aclosing(graph.astream(
+        state, config=config, stream_mode=["messages", "values"],
+    )) as events:
+        async for mode, payload in events:
+            if mode == "values":
+                final_state = InquiryState.model_validate(payload)
+            elif mode == "messages":
+                message, metadata = payload
+                if INQUIRY_REPLY_TAG in metadata.get("tags", []) and message.content:
+                    emitted_reply = True
+                    yield "token", message.content
+
+    # 急症等节点直接生成固定回复，没有正文模型流时仍需发送该回复。
+    if not emitted_reply:
+        for message in reversed(final_state.messages):
+            if isinstance(message, AIMessage):
+                yield "token", message.content
+                break
+    yield "state", final_state
+
+
 async def run_inquiry(
     user_message: str,
     thread_id: str,
@@ -641,20 +706,9 @@ async def run_inquiry(
     """
     graph = build_inquiry_graph(deps)
 
-    if existing_state is None:
-        # 首轮：初始化状态
-        state = InquiryState(
-            session_id=thread_id,
-            patient_context=PatientContext(
-                patient_id=patient_id,
-                long_term_memories=long_term_memories or [],
-            ),
-        )
-    else:
-        state = existing_state
-
-    # 追加用户消息
-    state.messages.append(HumanMessage(content=user_message))
+    state = _prepare_inquiry_state(
+        user_message, thread_id, existing_state, patient_id, long_term_memories
+    )
 
     logger.info("▶ run_inquiry 开始 | session={} round={} entry={} user_id={}",
                 thread_id, state.round,
