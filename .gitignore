@@ -8,6 +8,8 @@ docker
 
 .idea
 
+docs
+
 # Distribution / packaging
 .Python
 build/
