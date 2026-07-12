@@ -1,7 +1,8 @@
+import json
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.prebuilt import ToolRuntime
 
 
@@ -272,3 +273,39 @@ async def test_symptom_node_uses_non_thinking_symptom_model(monkeypatch):
 
     assert result["confirmed_symptoms"] == ["fever"]
     assert captured["llm"] is symptom_llm
+
+class _MixedSupervisorStreamingAgent:
+    """模拟工具内部输出、模型 token 与节点完成后的完整消息同时出现在消息流中。"""
+
+    async def astream(self, inputs, **kwargs):
+        yield AIMessageChunk(content='{"is_emergency": false}'), {"langgraph_node": "tools"}
+        yield AIMessageChunk(content="您好，"), {"langgraph_node": "model"}
+        yield AIMessageChunk(content="建议挂呼吸内科。"), {"langgraph_node": "model"}
+        yield AIMessage(content="您好，建议挂呼吸内科。"), {"langgraph_node": "model"}
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_hides_tool_messages_and_duplicate_completed_message(monkeypatch):
+    monkeypatch.setattr(chat_router, "get_checkpointer_redis", lambda: _FakeRedis())
+
+    async def fake_get_supervisor_agent():
+        return _MixedSupervisorStreamingAgent()
+
+    monkeypatch.setattr(chat_router, "get_supervisor_agent", fake_get_supervisor_agent)
+    request = chat_router.ChatRequest(
+        user_id="user-1",
+        session_id="session-1",
+        message="我头痛发热两天了",
+    )
+
+    response = await chat_router.chat_stream(request, db=object())
+    events = [
+        json.loads(raw.removeprefix("data: ").strip())
+        async for raw in response.body_iterator
+    ]
+
+    assert events == [
+        {"type": "token", "content": "您好，"},
+        {"type": "token", "content": "建议挂呼吸内科。"},
+        {"type": "done", "session_id": "session-1"},
+    ]

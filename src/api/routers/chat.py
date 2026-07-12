@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from langchain_core.messages import AIMessageChunk
 from loguru import logger
 
 from src.infra.database import get_db
@@ -31,6 +32,16 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
+
+
+def _is_supervisor_reply_chunk(message, metadata: dict) -> bool:
+    """??? Supervisor ??????????? SSE?????????????"""
+    return (
+        isinstance(message, AIMessageChunk)
+        and metadata.get("langgraph_node") == "model"
+        and isinstance(message.content, str)
+        and bool(message.content)
+    )
 
 
 def _make_keys(user_id: str, session_id: str) -> tuple[str, str]:
@@ -177,8 +188,8 @@ async def chat_stream(
                     stream_mode="messages",
                 ):
                     if isinstance(chunk, tuple):
-                        msg_chunk, _ = chunk
-                        if hasattr(msg_chunk, "content") and msg_chunk.content:
+                        msg_chunk, metadata = chunk
+                        if _is_supervisor_reply_chunk(msg_chunk, metadata):
                             data = json.dumps(
                                 {"type": "token", "content": msg_chunk.content},
                                 ensure_ascii=False,
